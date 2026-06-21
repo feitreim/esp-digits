@@ -1,30 +1,28 @@
 #![no_std]
-use nalgebra::{ComplexField, Const, MatrixView, SMatrix, SVector, SVectorView};
+use nalgebra::{ComplexField, Const, MatrixView, SVector, SVectorView};
+
+const EPS: f32 = 1e-5;
 
 #[derive(Debug)]
-struct Linear<'a, const OUT: usize, const IN: usize> {
+struct Linear<'a, const IN: usize, const OUT: usize> {
     w: MatrixView<'a, f32, Const<OUT>, Const<IN>>,
     b: Option<SVectorView<'a, f32, OUT>>,
 }
 
-impl<'a, const OUT: usize, const IN: usize> Linear<'a, OUT, IN> {
+impl<'a, const IN: usize, const OUT: usize> Linear<'a, IN, OUT> {
     fn new(
         w: MatrixView<'a, f32, Const<OUT>, Const<IN>>,
         b: Option<SVectorView<'a, f32, OUT>>,
     ) -> Self {
         Self { w, b }
     }
-}
 
-fn linear<'a, const OUT: usize, const IN: usize, const SEQ: usize>(
-    x: SMatrix<f32, IN, SEQ>,
-    linear: Linear<'a, OUT, IN>,
-) -> SMatrix<f32, OUT, SEQ> {
-    let mut y = linear.w * x;
-    if let Some(b) = linear.b {
-        y.column_iter_mut().for_each(|mut c| c += b);
-    };
-    y
+    fn linear(&self, x: SVector<f32, IN>) -> SVector<f32, OUT> {
+        match self.b {
+            Some(b) => self.w * x + b,
+            None => self.w * x,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -33,26 +31,19 @@ struct LayerNorm<'a, const DIM: usize> {
     beta: SVectorView<'a, f32, DIM>,
 }
 
-const EPS: f32 = 1e-5;
-
-fn layer_norm<'a, const DIM: usize, const SEQ: usize>(
-    mut x: SMatrix<f32, DIM, SEQ>,
-    norm: LayerNorm<'a, DIM>,
-) -> SMatrix<f32, DIM, SEQ> {
-    x.column_iter_mut().for_each(|mut c| {
-        let mean = c.mean();
-        let std = (c.variance() + EPS).sqrt();
-        c.add_scalar_mut(-mean);
-        c.unscale_mut(std);
-        c.component_mul_assign(&norm.gamma);
-        c += norm.beta;
-    });
-    x
+impl<'a, const DIM: usize> LayerNorm<'a, DIM> {
+    fn layer_norm(&self, mut x: SVector<f32, DIM>) -> SVector<f32, DIM> {
+        let mean = x.mean();
+        let std = (x.variance() + EPS).sqrt();
+        x.add_scalar_mut(-mean);
+        x.unscale_mut(std);
+        x.component_mul_assign(&self.gamma);
+        x += self.beta;
+        x
+    }
 }
 
-fn silu<const DIM: usize, const SEQ: usize>(
-    mut x: SMatrix<f32, DIM, SEQ>,
-) -> SMatrix<f32, DIM, SEQ> {
+fn silu<const DIM: usize>(mut x: SVector<f32, DIM>) -> SVector<f32, DIM> {
     x.apply(|a| *a *= 1.0 / (1.0 + (-*a).exp()));
     x
 }
@@ -62,15 +53,104 @@ struct TimestepEmbedding<'a, const HALF: usize> {
     freqs: SVectorView<'a, f32, HALF>,
 }
 
-// t should be continuous (0, 1000)
-fn timestep_embedding<const HALF: usize, const DIM: usize>(
-    t: f32,
-    embed: TimestepEmbedding<HALF>,
-) -> SVector<f32, DIM> {
-    debug_assert_eq!(DIM, 2*HALF);
-    let scaled = embed.freqs.scale(t);
-    let mut out = SVector::<f32, DIM>::zeros();
-    out.rows_mut(0, HALF).copy_from(&scaled.map(f32::sin));
-    out.rows_mut(HALF, HALF).copy_from(&scaled.map(f32::cos));
-    out
+impl<'a, const HALF: usize> TimestepEmbedding<'a, HALF> {
+    // t should be continuous (0, 1)
+    fn timestep_embedding<const DIM: usize>(&self, t: f32) -> SVector<f32, DIM> {
+        debug_assert_eq!(DIM, 2 * HALF);
+        let scaled = self.freqs.scale(t * 1000f32);
+        let mut out = SVector::<f32, DIM>::zeros();
+        out.rows_mut(0, HALF).copy_from(&scaled.map(f32::sin));
+        out.rows_mut(HALF, HALF).copy_from(&scaled.map(f32::cos));
+        out
+    }
+}
+
+struct TimeBlock<'a, const EMB: usize, const DIM: usize, const HALF: usize> {
+    embedding: TimestepEmbedding<'a, HALF>,
+    linear1: Linear<'a, EMB, DIM>,
+    linear2: Linear<'a, DIM, DIM>,
+}
+
+impl<'a, const EMB: usize, const DIM: usize, const HALF: usize> TimeBlock<'a, EMB, DIM, HALF> {
+    fn time_block(&self, t: f32) -> SVector<f32, DIM> {
+        let embed = self.embedding.timestep_embedding::<EMB>(t);
+        let h = self.linear1.linear(embed);
+        self.linear2.linear(silu(h))
+    }
+}
+
+#[derive(Debug)]
+struct AddBlock<'a, const DIM: usize> {
+    norm: LayerNorm<'a, DIM>,
+    fc: Linear<'a, DIM, DIM>,
+}
+
+impl<'a, const DIM: usize> AddBlock<'a, DIM> {
+    fn add_block(&self, h: SVector<f32, DIM>, temb: SVector<f32, DIM>) -> SVector<f32, DIM> {
+        h + self.fc.linear(silu(self.norm.layer_norm(h) + temb))
+    }
+}
+
+const IMG: usize = 784;
+const HIDDEN: usize = 256;
+const EMB: usize = 128;
+const HALF: usize = EMB / 2;
+const BLOCKS: usize = 3;
+
+pub struct Model<'a> {
+    time: TimeBlock<'a, EMB, HIDDEN, HALF>,
+    inp: Linear<'a, IMG, HIDDEN>,
+    blocks: [AddBlock<'a, HIDDEN>; BLOCKS],
+    out_norm: LayerNorm<'a, HIDDEN>,
+    out: Linear<'a, HIDDEN, IMG>,
+}
+
+fn lin<'a, const IN: usize, const OUT: usize>(w: &'a [f32], b: &'a [f32]) -> Linear<'a, IN, OUT> {
+    let w = MatrixView::<f32, Const<OUT>, Const<IN>>::from_slice(w);
+    Linear::new(w, Some(SVectorView::<f32, OUT>::from_slice(b)))
+}
+
+fn norm<'a, const DIM: usize>(gamma: &'a [f32], beta: &'a [f32]) -> LayerNorm<'a, DIM> {
+    LayerNorm {
+        gamma: SVectorView::<f32, DIM>::from_slice(gamma),
+        beta: SVectorView::<f32, DIM>::from_slice(beta),
+    }
+}
+
+impl<'a> Model<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        freqs: &'a [f32],
+        time_w1: &'a [f32], time_b1: &'a [f32],
+        time_w2: &'a [f32], time_b2: &'a [f32],
+        inp_w: &'a [f32], inp_b: &'a [f32],
+        norm_g: [&'a [f32]; BLOCKS], norm_b: [&'a [f32]; BLOCKS],
+        fc_w: [&'a [f32]; BLOCKS], fc_b: [&'a [f32]; BLOCKS],
+        out_norm_g: &'a [f32], out_norm_b: &'a [f32],
+        out_w: &'a [f32], out_b: &'a [f32],
+    ) -> Self {
+        Self {
+            time: TimeBlock {
+                embedding: TimestepEmbedding { freqs: SVectorView::from_slice(freqs) },
+                linear1: lin(time_w1, time_b1),
+                linear2: lin(time_w2, time_b2),
+            },
+            inp: lin(inp_w, inp_b),
+            blocks: core::array::from_fn(|i| AddBlock {
+                norm: norm(norm_g[i], norm_b[i]),
+                fc: lin(fc_w[i], fc_b[i]),
+            }),
+            out_norm: norm(out_norm_g, out_norm_b),
+            out: lin(out_w, out_b),
+        }
+    }
+
+    pub fn forward(&self, z: SVector<f32, IMG>, t: f32) -> SVector<f32, IMG> {
+        let temb = self.time.time_block(t);
+        let mut h = self.inp.linear(z);
+        for block in &self.blocks {
+            h = block.add_block(h, temb);
+        }
+        self.out.linear(self.out_norm.layer_norm(h))
+    }
 }
