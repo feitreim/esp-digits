@@ -1,5 +1,5 @@
 #![no_std]
-use nalgebra::{ComplexField, Const, MatrixView, SMatrix, SVectorView};
+use nalgebra::{ComplexField, Const, MatrixView, SMatrix, SVector, SVectorView};
 
 #[derive(Debug)]
 struct Linear<'a, const OUT: usize, const IN: usize> {
@@ -55,4 +55,22 @@ fn silu<const DIM: usize, const SEQ: usize>(
 ) -> SMatrix<f32, DIM, SEQ> {
     x.apply(|a| *a *= 1.0 / (1.0 + (-*a).exp()));
     x
+}
+
+#[derive(Debug)]
+struct TimestepEmbedding<'a, const HALF: usize> {
+    freqs: SVectorView<'a, f32, HALF>,
+}
+
+// t should be continuous (0, 1000)
+fn timestep_embedding<const HALF: usize, const DIM: usize>(
+    t: f32,
+    embed: TimestepEmbedding<HALF>,
+) -> SVector<f32, DIM> {
+    debug_assert_eq!(DIM, 2*HALF);
+    let scaled = embed.freqs.scale(t);
+    let mut out = SVector::<f32, DIM>::zeros();
+    out.rows_mut(0, HALF).copy_from(&scaled.map(f32::sin));
+    out.rows_mut(HALF, HALF).copy_from(&scaled.map(f32::cos));
+    out
 }
