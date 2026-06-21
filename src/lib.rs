@@ -3,6 +3,37 @@ use nalgebra::{ComplexField, Const, MatrixView, SVector, SVectorView};
 
 const EPS: f32 = 1e-5;
 
+/// xorshift64* PRNG with a Box–Muller transform for standard-normal samples.
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed | 1) // a zero state is a fixed point of xorshift
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    fn uniform(&mut self) -> f32 {
+        // top 24 bits → [0, 1), the mantissa width of f32
+        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+
+    pub fn randn<const N: usize>(&mut self) -> SVector<f32, N> {
+        SVector::from_fn(|_, _| {
+            let u1 = self.uniform().max(1e-7); // keep ln finite
+            let u2 = self.uniform();
+            (-2.0 * u1.ln()).sqrt() * (core::f32::consts::TAU * u2).cos()
+        })
+    }
+}
+
 #[derive(Debug)]
 struct Linear<'a, const IN: usize, const OUT: usize> {
     w: MatrixView<'a, f32, Const<OUT>, Const<IN>>,

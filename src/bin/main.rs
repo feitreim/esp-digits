@@ -12,8 +12,9 @@ use esp_hal::main;
 use esp_hal::time::{Duration, Instant};
 
 use esp_println::println;
+use heapless::String;
 use nalgebra::SVector;
-use rust_esp_test::Model;
+use rust_esp_test::{Model, Rng};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -21,6 +22,29 @@ esp_bootloader_esp_idf::esp_app_desc!();
 mod f {
     include!("../model_fixture.rs");
 }
+
+// Each shade glyph is a 3-byte UTF-8 char, plus one '\n' per row.
+const CANVAS_SIZE: usize = (28 * 28 * 3) + 28;
+
+fn pixel_to_char(pix: f32) -> char {
+    const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
+    let i = (pix * SHADES.len() as f32) as usize;
+    SHADES[i.min(SHADES.len() - 1)]
+}
+
+fn print_digit(pixels: SVector<f32, 784>) -> String<CANVAS_SIZE> {
+    let mut s = String::new();
+    for y in 0..28 {
+        for x in 0..28 {
+            let pix = pixels[(y * 28 + x) as usize];
+            s.push(pixel_to_char(pix)).ok();
+        }
+        s.push('\n').ok();
+    }
+    s
+}
+
+const N: usize = 1000;
 
 #[allow(
     clippy::large_stack_frames,
@@ -45,20 +69,24 @@ fn main() -> ! {
         &f::OUT_W, &f::OUT_B,
     );
 
-    let z = SVector::<f32, 784>::from_column_slice(&f::INPUT);
+    let mut rng = Rng::new(0xC0FFEE);
 
     loop {
+        let mut z = rng.randn::<784>(); // t=0: fresh Gaussian noise
         let start = Instant::now();
-        let out = model.forward(z, f::T);
-        let elapsed = start.elapsed();
+        let dt = 1.0 / N as f32;
+        let mut t = 0.0;
+        for _ in 0..N-1 {
+            let x_hat = model.forward(z,t);
+            z += (x_hat - z) / (1.0 - t) * dt;
+            t += dt;
+        }
+        let elapsed = start.elapsed().as_millis() as f32 / 1_000.0;
 
-        let max_err = out
-            .iter()
-            .zip(f::EXPECTED)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-
-        println!("max_err={} time={}", max_err, elapsed);
+        // Model works in (-1, 1) remap to (0, 1) for the shade ramp.
+        let image = z.map(|p| (p.clamp(-1.0, 1.0) + 1.0) / 2.0);
+        println!("{}", print_digit(image));
+        println!("sampled {} steps in {:.3} seconds", N, elapsed);
 
         let delay = Instant::now();
         while delay.elapsed() < Duration::from_millis(1000) {}
