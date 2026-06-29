@@ -152,17 +152,26 @@ impl<'a> Model<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         freqs: &'a [f32],
-        time_w1: &'a [f32], time_b1: &'a [f32],
-        time_w2: &'a [f32], time_b2: &'a [f32],
-        inp_w: &'a [f32], inp_b: &'a [f32],
-        norm_g: [&'a [f32]; BLOCKS], norm_b: [&'a [f32]; BLOCKS],
-        fc_w: [&'a [f32]; BLOCKS], fc_b: [&'a [f32]; BLOCKS],
-        out_norm_g: &'a [f32], out_norm_b: &'a [f32],
-        out_w: &'a [f32], out_b: &'a [f32],
+        time_w1: &'a [f32],
+        time_b1: &'a [f32],
+        time_w2: &'a [f32],
+        time_b2: &'a [f32],
+        inp_w: &'a [f32],
+        inp_b: &'a [f32],
+        norm_g: [&'a [f32]; BLOCKS],
+        norm_b: [&'a [f32]; BLOCKS],
+        fc_w: [&'a [f32]; BLOCKS],
+        fc_b: [&'a [f32]; BLOCKS],
+        out_norm_g: &'a [f32],
+        out_norm_b: &'a [f32],
+        out_w: &'a [f32],
+        out_b: &'a [f32],
     ) -> Self {
         Self {
             time: TimeBlock {
-                embedding: TimestepEmbedding { freqs: SVectorView::from_slice(freqs) },
+                embedding: TimestepEmbedding {
+                    freqs: SVectorView::from_slice(freqs),
+                },
                 linear1: lin(time_w1, time_b1),
                 linear2: lin(time_w2, time_b2),
             },
